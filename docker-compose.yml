@@ -1,0 +1,6 @@
+services:
+  eval-gen:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      EVAL_TARGET: ${EVAL_TARGET:-500}
