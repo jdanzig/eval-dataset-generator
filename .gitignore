@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.traffic_cache.json
+eval_set.json
+coverage.html
+
+.DS_Store
