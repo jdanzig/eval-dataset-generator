@@ -1,33 +1,25 @@
-"""Zero-dependency local embeddings (hashing trick over content tokens) for clustering."""
+"""Real semantic embeddings via a local sentence-transformers model (no API cost). Replaces the
+hash-trick embedder so HDBSCAN finds real intent clusters instead of lexical noise. `tokens` is a
+small content-word tokenizer used only to name clusters."""
 from __future__ import annotations
-
-import hashlib
 import re
-
 import numpy as np
 
-_WORD = re.compile(r"[a-z0-9]+")
-_STOP = {"the", "a", "an", "of", "to", "in", "is", "are", "what", "which", "who", "how",
-         "did", "does", "was", "were", "on", "for", "and", "or", "at", "by", "from"}
+_MODEL = None
+_NAME = "all-MiniLM-L6-v2"
+_STOP = {"the","a","an","of","to","in","is","are","what","how","does","do","and","or","for","on",
+         "with","when","why","which","between","vs","my","we","our","i","you","should","can","if",
+         "that","this","it","be","as","at","by","from","about","get","got"}
 
+def _model():
+    global _MODEL
+    if _MODEL is None:
+        from sentence_transformers import SentenceTransformer
+        _MODEL = SentenceTransformer(_NAME)
+    return _MODEL
 
-def tokens(text: str) -> list[str]:
-    return [t for t in _WORD.findall(text.lower()) if t not in _STOP]
+def embed(texts: list[str]) -> np.ndarray:
+    return _model().encode(texts, normalize_embeddings=True, show_progress_bar=False).astype(np.float32)
 
-
-def _h(tok: str, dim: int) -> int:
-    return int.from_bytes(hashlib.blake2b(tok.encode(), digest_size=8).digest(), "big") % dim
-
-
-def embed(texts: list[str], dim: int = 512) -> np.ndarray:
-    out = np.zeros((len(texts), dim), dtype=np.float32)
-    for i, text in enumerate(texts):
-        toks = tokens(text)
-        for t in toks:
-            out[i, _h(t, dim)] += 1.0
-        for a, b in zip(toks, toks[1:]):
-            out[i, _h(a + "_" + b, dim)] += 1.0
-        nrm = np.linalg.norm(out[i])
-        if nrm > 0:
-            out[i] /= nrm
-    return out
+def tokens(s: str) -> list[str]:
+    return [t for t in re.findall(r"[a-z0-9]+", s.lower()) if t not in _STOP and len(t) > 2]
