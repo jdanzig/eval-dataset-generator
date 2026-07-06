@@ -1,0 +1,33 @@
+{
+ "traffic_count": 60,
+ "final_count": 71,
+ "intents": 5,
+ "review_queue_size": 44,
+ "by_source": {
+  "traffic": 60,
+  "paraphrase": 7,
+  "adversarial": 4
+ },
+ "by_tier": {
+  "hard": 17,
+  "medium": 35,
+  "easy": 19
+ },
+ "proof": {
+  "easy": {
+   "n": 18,
+   "failures": 1,
+   "failure_rate": 0.056
+  },
+  "medium": {
+   "n": 32,
+   "failures": 8,
+   "failure_rate": 0.25
+  },
+  "hard": {
+   "n": 14,
+   "failures": 6,
+   "failure_rate": 0.429
+  }
+ }
+}
