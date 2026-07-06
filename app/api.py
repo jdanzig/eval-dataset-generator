@@ -1,18 +1,36 @@
-"""Review-queue + coverage API. Builds the eval set once on startup."""
+"""Review-queue + coverage API.
+
+Serves a PREBUILT eval set (`eval_set.json`, produced by `python -m app.cli build`) so startup is
+instant and free — the service doesn't call the model. The review queue is reconstructed from the
+cases the labeler flagged for human review.
+"""
 from __future__ import annotations
 
+import json
 import os
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from .coverage import build_matrix, render_text, thin_cells
-from .generate import build_eval_set
+from .dataset import load_dataset
+from .label import ReviewQueue
 
-app = FastAPI(title="Eval Dataset Generator", version="1.0.0")
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+app = FastAPI(title="Eval Dataset Generator", version="2.0.0")
 
-_target = int(os.getenv("EVAL_TARGET", "1500"))
-cases, queue, report = build_eval_set(target=_target)
+_path = os.path.join(HERE, "eval_set.json")
+if not os.path.exists(_path):
+    raise RuntimeError("eval_set.json not found — run `python -m app.cli build` first")
+version, cases = load_dataset(_path)
+
+queue = ReviewQueue()
+for c in cases:
+    if c.needs_review:
+        queue.enqueue(c.id, c.question, c.reference, c.confidence, c.ambiguous)
+
+_report_path = os.path.join(HERE, "build_report.json")
+report = json.load(open(_report_path)) if os.path.exists(_report_path) else {}
 
 
 class Resolution(BaseModel):
@@ -22,14 +40,16 @@ class Resolution(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "cases": report.final_count}
+    return {"status": "ok", "version": version, "cases": len(cases)}
 
 
 @app.get("/stats")
 def stats():
-    return {"seed_count": report.seed_count, "final_count": report.final_count,
-            "intents": report.intents, "by_source": report.by_source,
-            "review_queue_size": report.review_queue_size}
+    return {"version": version, "count": len(cases),
+            "intents": report.get("intents"), "by_source": report.get("by_source"),
+            "by_tier": report.get("by_tier"),
+            "review_queue_size": len(queue.pending()),
+            "difficulty_proof": report.get("proof")}
 
 
 @app.get("/coverage")

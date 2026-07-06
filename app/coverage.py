@@ -1,5 +1,6 @@
-"""Coverage heatmap: intent × difficulty. Renders a terminal table and a standalone HTML file,
-and flags thin cells so you can see exactly where the eval set is under-covered.
+"""Coverage heatmap: intent × difficulty tier. Renders a terminal table and a standalone HTML
+file, and flags thin cells so you can see exactly where the eval set is under-covered. Difficulty
+tiers here are the MEASURED self-consistency tiers, not assigned labels.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ DIFFICULTIES = ["easy", "medium", "hard"]
 def build_matrix(cases: list[EvalCase]) -> dict[str, dict[str, int]]:
     matrix: dict[str, dict[str, int]] = defaultdict(lambda: {d: 0 for d in DIFFICULTIES})
     for c in cases:
-        matrix[c.intent][c.difficulty] += 1
+        matrix[c.intent][c.tier] += 1
     return matrix
 
 
