@@ -1,52 +1,67 @@
-"""Auto-labeling with a confidence score + a review queue.
+"""LLM auto-labeling with a confidence + a human-review queue.
 
-Confidence is heuristic (offline): a case with a concrete reference answer and clear lexical
-grounding scores high and is auto-accepted; sparse/empty references score low and are routed to
-a human review queue instead of being trusted blindly.
+A strong model proposes a reference answer for each question, rates its own confidence that the
+answer is correct and the question unambiguous, and flags questions too ambiguous to have a single
+right answer. Low-confidence / ambiguous cases route to a review queue instead of being trusted.
+`validate_labeler` measures the labeler's ambiguity calls against a human-labeled sample.
 """
 from __future__ import annotations
 
+import json
+import os
+import re
 from dataclasses import dataclass
 
-from .embed import tokens
+from .llm import complete
 
+STRONG = os.getenv("EVALGEN_STRONG_MODEL", "claude-opus-4-8")
 REVIEW_THRESHOLD = 0.6
 
 
 @dataclass
 class Label:
-    expected: str
+    answer: str
     confidence: float
+    ambiguous: bool
     needs_review: bool
 
 
-def auto_label(question: str, reference: str) -> Label:
-    ref = reference.strip()
-    if not ref:
-        # no gold reference to trust -> must be reviewed
-        return Label("", 0.0, needs_review=True)
+def _parse_json(text: str) -> dict:
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return {}
 
-    # We DO have a gold reference, so start confident and dock points for the things that make an
-    # auto-label untrustworthy: an over-long/essay answer, or a vague one-token answer with no
-    # grounding in the question.
-    confidence = 0.85
-    if len(ref) > 60:
-        confidence -= 0.3                       # long answers are harder to grade exactly
-    if len(tokens(ref)) <= 1 and not (set(tokens(question)) & set(tokens(ref))):
-        confidence -= 0.15                      # terse + ungrounded -> slightly less certain
-    confidence = round(max(0.0, min(1.0, confidence)), 3)
-    return Label(ref, confidence, needs_review=confidence < REVIEW_THRESHOLD)
+
+def auto_label(question: str) -> Label:
+    text = complete(
+        STRONG,
+        "You are labeling an evaluation set of growth-analytics questions. For the question, "
+        "return JSON with: \"answer\" (the correct, concise reference answer), \"confidence\" "
+        "(0.0-1.0, how sure you are the answer is correct and the question has a single clear "
+        "answer), \"ambiguous\" (true if the question is too vague or under-specified to have one "
+        "correct answer). Return ONLY the JSON.\n\n"
+        f"Question: {question}",
+        max_tokens=300)
+    d = _parse_json(text)
+    ans = str(d.get("answer", "")).strip()
+    conf = float(d.get("confidence", 0.5)) if isinstance(d.get("confidence"), (int, float)) else 0.5
+    ambiguous = bool(d.get("ambiguous", False))
+    needs = ambiguous or conf < REVIEW_THRESHOLD or not ans
+    return Label(ans, round(conf, 3), ambiguous, needs)
 
 
 class ReviewQueue:
-    """Holds low-confidence cases for human confirm/correct/reject."""
-
     def __init__(self):
         self._items: dict[str, dict] = {}
 
-    def enqueue(self, case_id: str, question: str, proposed: str, confidence: float) -> None:
-        self._items[case_id] = {"id": case_id, "question": question,
-                                "proposed": proposed, "confidence": confidence,
+    def enqueue(self, case_id: str, question: str, proposed: str, confidence: float,
+                ambiguous: bool):
+        self._items[case_id] = {"id": case_id, "question": question, "proposed": proposed,
+                                "confidence": confidence, "ambiguous": ambiguous,
                                 "status": "pending"}
 
     def pending(self) -> list[dict]:
@@ -54,10 +69,24 @@ class ReviewQueue:
 
     def resolve(self, case_id: str, decision: str, corrected: str | None = None) -> dict:
         item = self._items[case_id]
-        item["status"] = decision                 # confirmed | corrected | rejected
+        item["status"] = decision
         if corrected is not None:
             item["proposed"] = corrected
         return item
 
     def __len__(self) -> int:
         return len(self._items)
+
+
+def validate_labeler(labeled: list[dict]) -> dict:
+    """Measure the labeler's ambiguity flag against human labels. Items: {question, human_ambiguous}."""
+    correct = 0
+    rows = []
+    for item in labeled:
+        lab = auto_label(item["question"])
+        agree = lab.ambiguous == bool(item["human_ambiguous"])
+        correct += agree
+        rows.append({"question": item["question"][:50], "human": item["human_ambiguous"],
+                     "labeler": lab.ambiguous, "conf": lab.confidence})
+    n = len(labeled)
+    return {"n": n, "agreement": round(correct / n, 3) if n else 0.0, "rows": rows}
