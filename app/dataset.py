@@ -2,29 +2,40 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 
 
 @dataclass
 class EvalCase:
     id: str
     question: str
-    expected: str
     intent: str
-    difficulty: str          # easy | medium | hard
-    source: str              # seed | paraphrase | adversarial
+    source: str                 # traffic | paraphrase | adversarial
+    reference: str              # the LLM-proposed label
     confidence: float
-    needs_review: bool = False
-    provenance: dict = field(default_factory=dict)
+    ambiguous: bool
+    needs_review: bool
+    difficulty: float           # self-consistency difficulty in [0,1]
+    tier: str                   # easy | medium | hard (from measured difficulty)
+    correct: bool | None = None  # did the target model get it right (for the proof)?
+
+
+def tier_of(difficulty: float) -> str:
+    """Thresholds calibrated on the observed difficulty distribution (roughly terciles)."""
+    if difficulty < 0.14:
+        return "easy"
+    if difficulty < 0.24:
+        return "medium"
+    return "hard"
 
 
 def save_dataset(path: str, cases: list[EvalCase], version: str) -> None:
-    payload = {"version": version, "count": len(cases), "cases": [asdict(c) for c in cases]}
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=1)
+        json.dump({"version": version, "count": len(cases),
+                   "cases": [asdict(c) for c in cases]}, f, indent=1)
 
 
 def load_dataset(path: str) -> tuple[str, list[EvalCase]]:
     with open(path, encoding="utf-8") as f:
-        payload = json.load(f)
-    return payload["version"], [EvalCase(**c) for c in payload["cases"]]
+        d = json.load(f)
+    return d["version"], [EvalCase(**c) for c in d["cases"]]
