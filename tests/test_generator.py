@@ -1,61 +1,72 @@
+"""Offline unit tests — no API key, no model download. They cover the pure logic:
+tiering, persistence, the review queue, coverage matrix, proof computation, and the difficulty
+math's degenerate cases. The LLM-dependent paths (labeling, sampling, judging) are exercised by
+`make build`, which needs a key.
+"""
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.augment import adversarials, paraphrases
 from app.coverage import build_matrix, thin_cells
-from app.generate import build_eval_set
-from app.label import auto_label
+from app.dataset import EvalCase, load_dataset, save_dataset, tier_of
+from app.difficulty import self_consistency_difficulty
+from app.generate import _proof
+from app.label import ReviewQueue, _parse_json
 
 
-def synthetic_traffic(n=120):
-    topics = [
-        ("physics", "What is the speed of light?", "300000 km/s"),
-        ("history", "When did the French Revolution begin?", "1789"),
-        ("biology", "What organelle produces energy in a cell?", "mitochondria"),
-        ("geography", "What is the capital of Japan?", "Tokyo"),
-    ]
-    out = []
-    for i in range(n):
-        topic, q, a = topics[i % len(topics)]
-        # vary the question slightly so clusters have >1 member but stay topical
-        out.append({"question": f"{q} (item {i // len(topics)})", "reference": a, "topic": topic})
-    return out
+def _case(cid, intent, tier, correct, needs_review=False):
+    return EvalCase(cid, f"q-{cid}", intent, "traffic", "ref", 0.9, False, needs_review,
+                    {"easy": 0.05, "medium": 0.2, "hard": 0.5}[tier], tier, correct)
 
 
-def test_confidence_high_with_reference():
-    lab = auto_label("What is the capital of Japan?", "Tokyo")
-    assert lab.confidence >= 0.6
-    assert not lab.needs_review
+def test_tier_thresholds():
+    assert tier_of(0.0) == "easy"
+    assert tier_of(0.2) == "medium"
+    assert tier_of(0.5) == "hard"
 
 
-def test_empty_reference_goes_to_review():
-    lab = auto_label("Unanswerable?", "")
-    assert lab.needs_review
-    assert lab.confidence == 0.0
+def test_self_consistency_degenerate():
+    # fewer than 2 non-empty answers → not enough signal → 0.0 (no model call)
+    assert self_consistency_difficulty([""]) == 0.0
+    assert self_consistency_difficulty(["only one"]) == 0.0
+    assert self_consistency_difficulty(["a", "  "]) == 0.0
 
 
-def test_augment_variants_are_distinct():
-    q = "What is the capital of Japan?"
-    ps, advs = paraphrases(q), adversarials(q)
-    assert len(set(ps)) == len(ps) and all(ps)
-    assert len(set(advs)) == len(advs) and all(advs)
+def test_parse_json_extracts_object():
+    assert _parse_json('junk {"answer": "x", "confidence": 0.8} tail')["confidence"] == 0.8
+    assert _parse_json("no json here") == {}
 
 
-def test_build_reaches_target_and_records_seed():
-    cases, queue, report = build_eval_set(seed_n=20, target=300, min_cluster_size=5,
-                                          traffic=synthetic_traffic(120))
-    assert report.seed_count == 20
-    assert report.final_count >= 300
-    # difficulty bands all present
-    diffs = {c.difficulty for c in cases}
-    assert {"easy", "medium", "hard"} <= diffs
+def test_review_queue_lifecycle():
+    q = ReviewQueue()
+    q.enqueue("c1", "why?", "because", 0.4, True)
+    assert len(q.pending()) == 1
+    q.resolve("c1", "confirmed")
+    assert q.pending() == []
+    assert len(q) == 1
 
 
-def test_coverage_balanced_no_thin_cells_after_growth():
-    cases, _, _ = build_eval_set(seed_n=20, target=400, traffic=synthetic_traffic(120))
-    matrix = build_matrix(cases)
-    assert len(matrix) >= 2                    # multiple intents
-    # round-robin augmentation should leave few/no thin cells among non-tiny intents
-    assert len(thin_cells(cases, min_per_cell=3)) <= 2
+def test_dataset_roundtrip(tmp_path):
+    cases = [_case("a", "churn", "easy", True), _case("b", "churn", "hard", False)]
+    p = str(tmp_path / "d.json")
+    save_dataset(p, cases, "v1")
+    version, loaded = load_dataset(p)
+    assert version == "v1" and len(loaded) == 2
+    assert loaded[1].tier == "hard" and loaded[1].correct is False
+
+
+def test_proof_bins_failure_rate_by_tier():
+    cases = [_case("e1", "i", "easy", True), _case("e2", "i", "easy", True),
+             _case("h1", "i", "hard", False), _case("h2", "i", "hard", True)]
+    proof = _proof(cases)
+    assert proof["easy"]["failure_rate"] == 0.0
+    assert proof["hard"]["failure_rate"] == 0.5
+
+
+def test_coverage_matrix_and_thin_cells():
+    cases = [_case("a", "churn", "easy", True), _case("b", "churn", "easy", True),
+             _case("c", "ltv", "hard", False)]
+    m = build_matrix(cases)
+    assert m["churn"]["easy"] == 2
+    assert ("ltv", "easy", 0) in thin_cells(cases, min_per_cell=3)
